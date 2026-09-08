@@ -29,16 +29,30 @@ class PredictorModel():
 
 
 class PredictorModelXG():
-    def __init__(self):
+    def __init__(
+            self, 
+            n_estimators, 
+            max_depth, 
+            learning_rate, 
+            min_child_weight, 
+            subsample, 
+            colsample_bytree
+            ):
+        self.n_estimators = n_estimators
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.min_child_weight = min_child_weight
+        self.subsample = subsample
+        self.colsample_bytree = colsample_bytree
         self.model = XGBClassifier(
             objective="binary:logistic",
             eval_metric="logloss",
-            n_estimators=200,
-            learning_rate=0.03,
-            max_depth=2,
-            min_child_weight=10,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            n_estimators=self.n_estimators,
+            learning_rate=self.learning_rate,
+            max_depth=self.max_depth,
+            min_child_weight=self.min_child_weight,
+            subsample=self.subsample,
+            colsample_bytree=self.colsample_bytree,
             reg_alpha=0.1,
             reg_lambda=5.0,
             random_state=42,
