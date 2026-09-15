@@ -6,3 +6,4 @@ xgboost
 matplotlib
 optuna
 notebook
+scipy

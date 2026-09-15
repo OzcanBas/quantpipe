@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+from pathlib import Path
 
 import logging
 
@@ -13,36 +14,79 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+CACHE_DIR = Path("data/raw")
+
+
+def _cache_key(ticker, start, end, interval, auto_adjust):
+    safe_ticker = ticker.replace("^", "idx_").replace("/", "_").replace("=", "_")
+    adjust = "adjusted" if auto_adjust else "unadjusted"
+    return f"{safe_ticker}_{start}_{end}_{interval}_{adjust}.pkl"
+
+
+def _normalize_downloaded_data(data, ticker):
+    if isinstance(data.columns, pd.MultiIndex):
+        if ticker in data.columns.get_level_values(-1):
+            data = data.xs(ticker, axis=1, level=-1)
+        elif ticker in data.columns.get_level_values(0):
+            data = data.xs(ticker, axis=1, level=0)
+
+    return data.sort_index()
+
+
+def load_price_data(
+        ticker,
+        start="2015-01-01",
+        end="2025-01-01",
+        interval="1d",
+        auto_adjust=False,
+        refresh_cache=False
+        ):
+    """Load raw Yahoo Finance data, caching the exact response for repeatable runs."""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_path = CACHE_DIR / _cache_key(ticker, start, end, interval, auto_adjust)
+
+    if cache_path.exists() and not refresh_cache:
+        logger.info(f"{ticker}: Loading raw data from cache: {cache_path}")
+        return pd.read_pickle(cache_path)
+
+    data = yf.download(
+        ticker,
+        start=start,
+        end=end,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        threads=False,
+        progress=True,
+    )
+
+    if data is None or data.empty:
+        raise ValueError(f"No data returned for {ticker}. Check ticker or network connection.")
+
+    data = _normalize_downloaded_data(data, ticker)
+    data.to_pickle(cache_path)
+    logger.info(f"{ticker}: Cached raw data at {cache_path}")
+    return data
+
+
 class DataHandler():
-    def __init__(self, ticker, start="2015-01-01", end="2025-01-01"):
+    def __init__(self, ticker, start="2015-01-01", end="2025-01-01", refresh_cache=False):
         self.ticker = ticker
         self.start = start
         self.end = end
+        self.refresh_cache = refresh_cache
 
     def __str__(self):
         return f"DataHandler({self.ticker})"
 
     def download_data(self):
-        data = yf.download(
+        self.data = load_price_data(
             self.ticker,
             start=self.start,
             end=self.end,
             interval="1d",
             auto_adjust=False,
-            threads=True,
-            progress=True,
+            refresh_cache=self.refresh_cache,
         )
-
-        if data is None or data.empty:
-            raise ValueError(f"No data returned for {self.ticker}. Check ticker or network connection.")
-
-        if isinstance(data.columns, pd.MultiIndex):
-            if self.ticker in data.columns.get_level_values(-1):
-                data = data.xs(self.ticker, axis=1, level=-1)
-            elif self.ticker in data.columns.get_level_values(0):
-                data = data.xs(self.ticker, axis=1, level=0)
-
-        self.data = data
 
     def n_day_returns(self, n):
         return self.data["Close"].pct_change(n)
@@ -86,7 +130,14 @@ class DataHandler():
         }
 
         for ticker, prefix in cross_assets.items():
-            data = yf.download(ticker, start=self.start, end=self.end)
+            data = load_price_data(
+                ticker,
+                start=self.start,
+                end=self.end,
+                interval="1d",
+                auto_adjust=False,
+                refresh_cache=self.refresh_cache,
+            )
             close = data["Close"]
 
             if isinstance(close, pd.DataFrame):
@@ -168,3 +219,43 @@ class DataHandler():
         X = df_model[feature_cols].to_numpy()
         y = df_model["target"].to_numpy().astype(int)
         return X, y
+
+
+def build_pooled_dataset(
+        tickers,
+        windows=[10, 20],
+        target_horizon=1,
+        start="2015-01-01",
+        end="2025-01-01",
+        refresh_cache=False
+        ):
+    """Build a stacked panel of features across multiple tickers.
+
+    Each ticker's indicators (RSI, rolling returns, etc.) are computed from
+    its own price history only, then the per-ticker frames are concatenated
+    and sorted by date. Rows from different tickers can share the same date,
+    so callers must split/window this panel by date, not by row position.
+
+    Returns (pooled_df, feature_cols, handlers) where pooled_df has columns
+    ["Date", "ticker", *feature_cols, "target"], and handlers maps
+    ticker -> its DataHandler (with .data/.features already populated, so it
+    can be reused directly for backtesting).
+    """
+    frames = []
+    handlers = {}
+
+    for ticker in tickers:
+        handler = DataHandler(ticker, start=start, end=end, refresh_cache=refresh_cache)
+        handler.download_data()
+        feat = handler.build_feature_frame(windows, target_horizon).copy()
+        feat.index.name = "Date"
+        feat = feat.reset_index()
+        feat["ticker"] = ticker
+        frames.append(feat)
+        handlers[ticker] = handler
+
+    pooled = pd.concat(frames, ignore_index=True)
+    pooled = pooled.sort_values(["Date", "ticker"]).reset_index(drop=True)
+
+    feature_cols = [c for c in pooled.columns if c not in ("Date", "ticker", "target")]
+    return pooled, feature_cols, handlers

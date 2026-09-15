@@ -30,12 +30,12 @@ class PredictorModel():
 
 class PredictorModelXG():
     def __init__(
-            self, 
-            n_estimators, 
-            max_depth, 
-            learning_rate, 
-            min_child_weight, 
-            subsample, 
+            self,
+            n_estimators,
+            max_depth,
+            learning_rate,
+            min_child_weight,
+            subsample,
             colsample_bytree
             ):
         self.n_estimators = n_estimators
@@ -56,7 +56,7 @@ class PredictorModelXG():
             reg_alpha=0.1,
             reg_lambda=5.0,
             random_state=42,
-            n_jobs=-1,
+            n_jobs=1,
         )
         self.is_fitted = False
 
