@@ -14,7 +14,8 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-CACHE_DIR = Path("data/raw")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CACHE_DIR = PROJECT_ROOT / "data" / "raw"
 
 
 def _cache_key(ticker, start, end, interval, auto_adjust):
@@ -153,9 +154,9 @@ class DataHandler():
         missing_before = self.data.isna().sum().sum()
 
         if missing_before > 0:
-            logger.info(f"{self.ticker}: Cleaning {missing_before} missing values using forward/backward fill.")
+            logger.info(f"{self.ticker}: Cleaning {missing_before} missing values using forward fill.")
 
-        self.data = self.data.ffill().bfill()
+        self.data = self.data.ffill()
 
         missing_after = self.data.isna().sum().sum()
 
@@ -189,7 +190,7 @@ class DataHandler():
         target[future_prices.isna()] = np.nan
         return target
 
-    def build_feature_frame(self, windows=[10, 20], target_horizon=1):
+    def build_feature_frame(self, windows=(10, 20), target_horizon=1):
         self.clean_missing()
         df = self.data.copy()
 
@@ -220,42 +221,52 @@ class DataHandler():
         y = df_model["target"].to_numpy().astype(int)
         return X, y
 
-
-def build_pooled_dataset(
+def build_train_test_dataset(
+        target_ticker,
         tickers,
-        windows=[10, 20],
+        windows=(10, 20),
         target_horizon=1,
-        start="2015-01-01",
-        end="2025-01-01",
+        start_date="2015-01-01",
+        end_date="2025-01-01",
+        split_date="2023-01-01",
         refresh_cache=False
-        ):
-    """Build a stacked panel of features across multiple tickers.
+    ):
+    """Build features from full history, then split off leak-free training rows."""
 
-    Each ticker's indicators (RSI, rolling returns, etc.) are computed from
-    its own price history only, then the per-ticker frames are concatenated
-    and sorted by date. Rows from different tickers can share the same date,
-    so callers must split/window this panel by date, not by row position.
+    if target_horizon < 1:
+        raise ValueError("target_horizon must be at least 1")
 
-    Returns (pooled_df, feature_cols, handlers) where pooled_df has columns
-    ["Date", "ticker", *feature_cols, "target"], and handlers maps
-    ticker -> its DataHandler (with .data/.features already populated, so it
-    can be reused directly for backtesting).
-    """
     frames = []
     handlers = {}
+    split_timestamp = pd.Timestamp(split_date)
 
     for ticker in tickers:
-        handler = DataHandler(ticker, start=start, end=end, refresh_cache=refresh_cache)
+        handler = DataHandler(ticker, start=start_date, end=end_date, refresh_cache=refresh_cache)
         handler.download_data()
         feat = handler.build_feature_frame(windows, target_horizon).copy()
+        target_dates = pd.Series(handler.data.index, index=handler.data.index).shift(-target_horizon)
+        feat["target_date"] = target_dates.reindex(feat.index)
         feat.index.name = "Date"
         feat = feat.reset_index()
         feat["ticker"] = ticker
+
+        # A target uses a price target_horizon trading rows later. Exclude
+        # the final training rows for this ticker so their labels stay before
+        # the test period, even when the split falls on a weekend or holiday.
+        pre_split_dates = handler.data.index[handler.data.index < split_timestamp]
+        safe_train_dates = pre_split_dates[:-target_horizon]
+        feat["train_eligible"] = feat["Date"].isin(safe_train_dates)
+
         frames.append(feat)
         handlers[ticker] = handler
 
     pooled = pd.concat(frames, ignore_index=True)
     pooled = pooled.sort_values(["Date", "ticker"]).reset_index(drop=True)
 
-    feature_cols = [c for c in pooled.columns if c not in ("Date", "ticker", "target")]
-    return pooled, feature_cols, handlers
+    feature_cols = [c for c in pooled.columns if c not in ("Date", "ticker", "target", "target_date", "train_eligible")]
+
+    pooled_train = pooled[pooled["train_eligible"]].drop(columns="train_eligible").reset_index(drop=True)
+    pooled_test = pooled[(pooled["ticker"] == target_ticker) & (pooled["Date"] >= split_timestamp)]
+    pooled_test = pooled_test.drop(columns="train_eligible").reset_index(drop=True)
+
+    return pooled_train, pooled_test, feature_cols, handlers

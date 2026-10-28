@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
+from .data import load_price_data
+
 
 class Backtester:
     def __init__(self, initial_capital=100000, transaction_cost=0.0001):
@@ -41,7 +43,9 @@ class Backtester:
         if end_date:
             df = df[df.index <= end_date]
 
-        self.prices = data_handler.data["Close"].loc[df.index]
+        # Portfolio values are recorded at each execution day's open. Use
+        # those same dates and prices for the buy-and-hold comparison.
+        self.prices = data_handler.data["Open"].loc[df.index[1:]]
         self.portfolio_value = []
         self.positions = []
         self.dates = []
@@ -193,13 +197,53 @@ class Backtester:
         final_value = initial_shares*prices.iloc[-1]
         return final_value
 
+    def get_risk_free_rate(self):
+        """Fetch average 10-year Treasury yield for the backtest period."""
+        if len(self.dates) == 0:
+            return 0.03  # fallback to 3% if no dates
 
-    def generate_performance_report(self):
+        start_date = pd.Timestamp(self.dates[0]).strftime("%Y-%m-%d")
+        end_date = (pd.Timestamp(self.dates[-1]) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+        try:
+            # Download 10-year Treasury yield (^TNX), using the shared raw-data cache
+            tnx = load_price_data('^TNX', start=start_date, end=end_date)
+            if tnx.empty:
+                return 0.03
+            # Yahoo reports the yield in annual percentage points.
+            annual_yield = np.nanmean(tnx['Close'].to_numpy(dtype=float))
+            if not np.isfinite(annual_yield):
+                return 0.03
+            return float(annual_yield / 100)
+        except Exception:
+            return 0.03  # fallback to 3% if fetch fails
+
+    def calculate_beta(self, market_prices):
+        """Calculate beta over entire backtest period: Cov(strategy_returns, market_returns) / Var(market_returns)"""
+        strategy = pd.Series(
+                    self.portfolio_value, index=self.dates, name="strategy"
+                )
+
+        market = market_prices.reindex(self.dates).rename("market")
+
+        returns = pd.concat(
+                    [
+                        strategy.pct_change(fill_method=None),
+                        market.pct_change(fill_method=None),
+                    ],
+                    axis=1,
+                ).dropna()
+
+        if len(returns) < 2 or returns["market"].var() == 0:
+            return np.nan
+
+        return returns["strategy"].cov(returns["market"]) / returns["market"].var()
+
+    def generate_performance_report(self, market_index):
         """Comprehensive performance analysis with all the key metrics (Sharpe Ratio, Maximum Drawdown...)."""
         returns = self.calculate_returns()
         if len(returns) == 0:
-            print("No returns to analyse")
-            return
+            return "No returns to analyse"
         
         # basic metrics
         total_return = ((self.portfolio_value[-1] / self.initial_capital) -1) * 100
@@ -212,6 +256,19 @@ class Backtester:
         # risk metrics
         volatility = returns.std() * np.sqrt(252) * 100
         sharpe_ratio = (returns.mean() * 252) / (returns.std() * np.sqrt(252)) if returns.std() > 0 else 0
+        beta = self.calculate_beta(market_index.data["Open"])
+
+        # Compare returns over the same first-to-last valuation period.
+        market_open = market_index.data["Open"].reindex(self.dates)
+        if market_open.isna().any():
+            raise ValueError("Market index is missing prices on backtest dates")
+        market_return = market_open.iloc[-1] / market_open.iloc[0] - 1
+
+        annual_risk_free_rate = self.get_risk_free_rate()
+        elapsed_days = (pd.Timestamp(self.dates[-1]) - pd.Timestamp(self.dates[0])).days
+        risk_free_return = (1 + annual_risk_free_rate) ** (elapsed_days / 365.25) - 1
+        expected_return = risk_free_return + beta * (market_return - risk_free_return)
+        alpha = float((total_return / 100 - expected_return) * 100)
 
         # drawdown calculation
         portfolio_series = pd.Series(self.portfolio_value)
@@ -233,6 +290,8 @@ class Backtester:
         print(f"Annualized Return: {annualized_return:.2f}%")
         print(f"Volatility (annualized): {volatility:.2f}%")
         print(f"Sharpe Ratio: {sharpe_ratio:.3f}")
+        print(f"Beta: {beta:.3f}")
+        print(f"Alpha: {alpha:.2f}%")
         print(f"Maximum Drawdown: {max_drawdown:.2f}%")
         print(f"Total Trades: {total_trades}")
         print(f"Winning Trades: {winning_trades}")
@@ -243,6 +302,8 @@ class Backtester:
             'annualized_return': annualized_return,
             'volatility': volatility,
             'sharpe_ratio': sharpe_ratio,
+            'beta': beta,
+            'alpha': alpha,
             'max_drawdown': max_drawdown,
             'total_trades': total_trades,
             'winning_trades': winning_trades,
