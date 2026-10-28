@@ -1,12 +1,17 @@
 __pycache__/
 *.pyc
 
+data/raw/
+
 .agents/
 .codex/
+.claude/
 
 .env
 .venv/
 venv/
+
+.ipynb_checkpoints/
 
 .vscode/
 .idea/
